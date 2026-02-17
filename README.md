@@ -51,3 +51,4 @@ You can run this repo as a "binder". The [mybinder.org](https://mybinder.org) pr
 
 My email is parkersa@bu.edu! 
 Sarah Kanee - skanee@bu.edu
+Brian Mekelburg - brianmek@bu.edu
