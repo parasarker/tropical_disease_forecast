@@ -18,7 +18,8 @@ disease_targets = read.csv(disease_url)
 # split observations by time to create timeseries for each site
 obs_by_time <- split(disease_targets$observation, disease_targets$datetime) 
 
-# quantiles per time point to get a sense of the distribution of observations across sites at each time point
+# compute monthly quantiles
+# code borrowed from EF_Activities/Exercise_02_Logistic
 n.stats <- sapply(obs_by_time, quantile, probs = c(0.025, 0.5, 0.975), na.rm = TRUE)
 
 time <- as.Date(names(obs_by_time)) # convert from character to Date for plotting
@@ -27,30 +28,31 @@ ymed <- n.stats[2, ]
 yhi  <- n.stats[3, ]
 
 # function to draw a confidence interval ribbon between ylo and yhi across time points in x
-# borrowed from EF_Activities/Exercise_02_Logistic
 ciEnvelope <- function(x, ylo, yhi, col = rgb(0,0,0,0.2), ...) {
   polygon(c(x, rev(x), x[1]),
           c(ylo, rev(yhi), ylo[1]),
           border = NA, col = col, ...)
 }
 
-par(mfrow = c(2, 1),mar = c(3, 4, 3, 1))
+par(mfrow = c(3, 1),mar = c(3, 4, 3, 1))
 
+# to see raw points and get a sense for distribution across sites
+plot(as.Date(disease_targets$datetime), disease_targets$observation,
+     ylab = "VL Cases", col=rgb(0,0,0,0.2), pch = 16,
+     main = "Raw monthly observations")
+
+# to get a sense for variability across sites (zoom on median+CI)
 plot(time, ymed, type = "l",
-     ylim = range(c(ylo, yhi), na.rm = TRUE),
+     ylim = range(c(ylo, yhi)),
      ylab = "VL Cases",
      main = "Median trajectory across sites with 95% CI")
 
 ciEnvelope(time, ylo, yhi) # add confidence interval
 lines(time, ymed, lwd = 2) # redraw median on top
 
-plot(time, ymed, type = "l",
-     ylim = range(c(ylo, yhi, disease_targets$observation), na.rm = TRUE),
-     ylab = "VL Cases",
-     main = "Median trajectory with 95% CI and site observations")
+# total cases per monthly across sites (more standard for this kind of data!)
+total_cases <- sapply(obs_by_time, sum)
 
-ciEnvelope(time, ylo, yhi) # add confidence interval
-lines(time, ymed, lwd = 2) # redraw median on top
-
-# add points to see observations outside the quantiles
-points(as.Date(disease_targets$datetime), disease_targets$observation)
+barplot(total_cases, space=0, names.arg=format(time, "%Y   "), las=1,
+        ylab="VL cases",
+        main="Montly total VL cases across sites")
