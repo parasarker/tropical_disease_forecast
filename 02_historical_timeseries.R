@@ -9,6 +9,7 @@ library(rjags)
 library(daymetr)
 library(ecoforecastR)
 
+# get disease datat
 disease_url = 'https://minio-s3.apps.shift.nerc.mghpcc.org/bu4cast-ci-read/challenges/project_id=bu4cast/targets/tropical-disease-targets.csv'
 
 disease_targets = read.csv(disease_url)
@@ -23,9 +24,54 @@ y = sp_monthly$observation
 
 plot(time, y, type='l', ylab="Cases", lwd=2)
 
+# get weather data for Sao Paulo (we may need to double check this site to make sure it actually overlaps with ours)
+# we still dont have our actual met data, so this is our current best bet...
+daymet0 <- download_daymet(site = "SaoPaulo", start = 2007, end = 2025, internal = TRUE)
+daymet <- daymet0$data
+
+# make date col
+daymet$date <- as.Date(paste(daymet$year, daymet$yday, sep = "-"), "%Y-%j")
+
+# extract temp and precip data
+tMin <- daymet$tmin..deg.c.[match(time, daymet$date)]
+tM <- daymet$tmax..deg.c.[match(time, daymet$date)]
+precip <- daymet$prcp..mm.day.[match(time, daymet$date)]
+
+
+## remove the time points where climate data is unavailable
+# find rows that DO have climate data
+hasData <- !is.na(tMax) & !is.na(tMin) & !is.na(precip)
+
+# subset data and covariates
+y <- y[hasData]
+tMax <- tMax[hasData]
+tMax <- tMax[hasData]
+precip <- precip[hasData]
+
+# Update length for JAGS
+n <- length(y)
+
+
+## add population data! 
+
+
+# Recreate data list for JAGS
+data <- list(
+  y = as.integer(y),
+  n = n,
+  tMax = tMax,
+  tMin = tMin,
+  precip = precip,
+  x_ic = log(mean(y) + 1),
+  tau_ic = 1,
+  a_add = 1,
+  r_add = 1
+)
+
+
 #### Define models & priors as string to be passed into JAGS ####
 
-RandomWalk = "
+StateSpace = "
 model{
   
  #### Data Model (Negative Binomial)
@@ -35,34 +81,40 @@ model{
     log(mu[t]) <- x[t]
   }
   
-  #### Process Model (same random walk)
-  for(t in 2:n){
-    x[t] ~ dnorm(x[t-1], tau_add)
-  }
+ #### Process Model (AR(1) with climate covariates)
+for(t in 2:n){
+  x[t] ~ dnorm(mu_proc[t], tau_add)
   
+  mu_proc[t] <- alpha + phi * x[t-1] + 
+  beta_tMax * tMax[t] + 
+  beta_tMin * tMin[t] + 
+  beta_precip * precip[t]
+  #beta_pop * pop[t]   # add population when we get pop data
+}
+
   #### Priors
-  x[1] ~ dnorm(x_ic, tau_ic)
+  x[1] ~ dnorm(x_ic, tau_ic) # prior for number of cases in first month
   
-  tau_add ~ dgamma(a_add, r_add)
+  tau_add ~ dgamma(a_add, r_add) # 
   
-  # Dispersion parameter (size)
+  # Dispersion parameter (size) for negative binomial
   r ~ dgamma(0.001, 0.001)
+  
+  
+  alpha ~ dnorm(0, 0.01) # AR(1) intercept
+  phi ~ dnorm(0, 0.01) # AR(1) coefficient = persistence 
+
+  beta_tMax ~ dnorm(0, 0.01)  #temp max covariate
+  beta_tMin ~ dnorm(0, 0.01)  #temp min covariate
+  beta_precip ~ dnorm(0, 0.01) #precip. covariate
+  # add population priors!
 }
 "
 # Notes
-  # JAGS parameterizes NB with r (size/dispersion) and p (success probability)
-  # Ensure mu[t] > 0
-  # Convert mean -> probability
+# JAGS parameterizes NB with r (size/dispersion) and p (success probability)
+# Ensure mu[t] > 0
+# Convert mean -> probability
 
-# Define data/priors as a list
-data <- list(
-  y = as.integer(y), # has to be integer for negative binary
-  n = length(y),
-  x_ic = log(mean(y) + 1),  # based on mean counts
-  tau_ic = 1,
-  a_add = 1,
-  r_add = 1
-)
 
 # Define initial model state
 nchain = 3 # num. of MCMC chains
@@ -80,7 +132,7 @@ for(i in 1:nchain){
 
 # Send info to JAGS
 j.model <- jags.model(
-  file = textConnection(RandomWalk),
+  file = textConnection(StateSpace),
   data = data,
   inits = init,
   n.chains = nchain
@@ -105,7 +157,7 @@ jags.out <- coda.samples(
   n.iter = 10000
 )
 
-# Visualize
+# Visualization (needs fixed now)
 time.rng = c(1,length(time))
 out <- as.matrix(jags.out)
 
