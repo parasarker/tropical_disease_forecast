@@ -34,9 +34,8 @@ daymet$date <- as.Date(paste(daymet$year, daymet$yday, sep = "-"), "%Y-%j")
 
 # extract temp and precip data
 tMin <- daymet$tmin..deg.c.[match(time, daymet$date)]
-tM <- daymet$tmax..deg.c.[match(time, daymet$date)]
+tMax <- daymet$tmax..deg.c.[match(time, daymet$date)]
 precip <- daymet$prcp..mm.day.[match(time, daymet$date)]
-
 
 ## remove the time points where climate data is unavailable
 # find rows that DO have climate data
@@ -45,15 +44,24 @@ hasData <- !is.na(tMax) & !is.na(tMin) & !is.na(precip)
 # subset data and covariates
 y <- y[hasData]
 tMax <- tMax[hasData]
-tMax <- tMax[hasData]
+tMin <- tMin[hasData]
 precip <- precip[hasData]
+time <- time[hasData]
 
 # Update length for JAGS
 n <- length(y)
 
-
 ## add population data! 
+pop_path <- file.path("data", "state_pop_by_year.csv")
+pop_df <- read.csv(pop_path)
+pop_sp <- subset(pop_df, state == "SP")
+pop_sp <- pop_sp[order(pop_sp$year), ]
 
+# repeated monthly within year (to match disease monthly cadence)
+population <- pop_sp$pop_est[match(as.integer(format(time, "%Y")), pop_sp$year)]
+
+# divided by 1 mil so beta_pop is per mil people (similar scale to climate covariates)
+pop_scaled <- population / 1e6
 
 # Recreate data list for JAGS
 data <- list(
@@ -62,6 +70,7 @@ data <- list(
   tMax = tMax,
   tMin = tMin,
   precip = precip,
+  pop = pop_scaled,
   x_ic = log(mean(y) + 1),
   tau_ic = 1,
   a_add = 1,
@@ -88,9 +97,9 @@ for(t in 2:n){
   mu_proc[t] <- alpha + phi * x[t-1] + 
   beta_tMax * tMax[t] + 
   beta_tMin * tMin[t] + 
-  beta_precip * precip[t]
-  #beta_pop * pop[t]   # add population when we get pop data
-}
+  beta_precip * precip[t] +
+  beta_pop * pop[t]
+  }
 
   #### Priors
   x[1] ~ dnorm(x_ic, tau_ic) # prior for number of cases in first month
@@ -107,7 +116,7 @@ for(t in 2:n){
   beta_tMax ~ dnorm(0, 0.01)  #temp max covariate
   beta_tMin ~ dnorm(0, 0.01)  #temp min covariate
   beta_precip ~ dnorm(0, 0.01) #precip. covariate
-  # add population priors!
+  beta_pop ~ dnorm(0, 0.01) #population covariate (NOT a prior for total population)
 }
 "
 # Notes
@@ -153,7 +162,7 @@ dic.samples(j.model, 2000)
 # Larger samples
 jags.out <- coda.samples(
   model = j.model,
-  variable.names = c("x","tau_add","r"),
+  variable.names = c("x","tau_add","r"),  #let's look at the other coefficients too at some point
   n.iter = 10000
 )
 
