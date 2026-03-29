@@ -170,22 +170,25 @@ jags.out <- coda.samples(
 time.rng = c(1,length(time))
 out <- as.matrix(jags.out)
 
-x.cols <- grep("^x", colnames(out))
+x.cols <- grep("^x\\[", colnames(out))
 
-ci <- apply(exp(out[,x.cols]), 2, quantile,
-            c(0.025,0.5,0.975))
+ci <- apply(exp(out[, x.cols]), 2, quantile, c(0.025, 0.5, 0.975))
 
 plot(time, ci[2,], type='n',
-     ylim=range(y, na.rm=TRUE),
-     ylab="Cases",
-     xlim=time[time.rng])
+     ylim = range(y, na.rm = TRUE),
+     ylab = "Cases",
+     xlab = "Date",
+     xlim = range(time))
 
-if(diff(time.rng) < 100){ 
+date_span_days <- as.numeric(diff(range(time)))
+if (date_span_days < 365 * 3) {
   axis.Date(1,
-            at=seq(time[time.rng[1]],
-                   time[time.rng[2]],
-                   by='month'),
-            format="%Y-%m")
+            at = seq(min(time), max(time), by = 'month'),
+            format = "%Y-%m")
+} else {
+  axis.Date(1,
+            at = seq(min(time), max(time), by = 'year'),
+            format = "%Y")
 }
 
 ecoforecastR::ciEnvelope(
