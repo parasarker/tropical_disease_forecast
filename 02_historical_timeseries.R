@@ -16,10 +16,11 @@ disease_targets = read.csv(disease_url)
 
 # subset data to only Sao Paolo sites
 sp <- subset(disease_targets, site_id >= 350000 & site_id < 360000)  # SP = 35xxxx IBGE prefix
-sp_monthly <- aggregate(observation ~ datetime, data = sp, sum, na.rm = TRUE) #aggregate to monthly
+sp$month <- as.Date(format(as.Date(sp$datetime), "%Y-%m-01"))
+sp_monthly <- aggregate(observation ~ month, data = sp, sum, na.rm = TRUE) #aggregate to monthly
 
 # Format input data
-time = as.Date(sp_monthly$datetime)
+time = sp_monthly$month
 y = sp_monthly$observation
 
 plot(time, y, type='l', ylab="Cases", lwd=2)
@@ -31,11 +32,19 @@ daymet <- daymet0$data
 
 # make date col
 daymet$date <- as.Date(paste(daymet$year, daymet$yday, sep = "-"), "%Y-%j")
+daymet$month <- as.Date(format(daymet$date, "%Y-%m-01"))
+
+#aggregate to monthly to match disease data
+tMin_monthly <- aggregate(daymet$tmin..deg.c., by = list(daymet$month), mean, na.rm = TRUE)
+tMax_monthly <- aggregate(daymet$tmax..deg.c., by = list(daymet$month), mean, na.rm = TRUE)
+precip_monthly <- aggregate(daymet$prcp..mm.day., by = list(daymet$month), sum, na.rm = TRUE)
+
+time_month <- as.Date(format(time, "%Y-%m-01"))
 
 # extract temp and precip data
-tMin <- daymet$tmin..deg.c.[match(time, daymet$date)]
-tMax <- daymet$tmax..deg.c.[match(time, daymet$date)]
-precip <- daymet$prcp..mm.day.[match(time, daymet$date)]
+tMin <- tMin_monthly[,2][match(time_month, tMin_monthly[,1])]
+tMax <- tMax_monthly[,2][match(time_month, tMax_monthly[,1])]
+precip <- precip_monthly[,2][match(time_month, precip_monthly[,1])]
 
 ## remove the time points where climate data is unavailable
 # find rows that DO have climate data
@@ -71,10 +80,15 @@ data <- list(
   tMin = tMin,
   precip = precip,
   pop = pop_scaled,
+  
   x_ic = log(mean(y) + 1),
   tau_ic = 1,
+  
   a_add = 1,
-  r_add = 1
+  r_add = 1,
+  
+  a_r = 1, # i think we need to add these too
+  r_r = 1
 )
 
 
