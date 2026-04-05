@@ -11,3 +11,9 @@
 -   Source: IBGE population estimates
 
     <https://ftp.ibge.gov.br/Estimativas_de_Populacao/>
+
+#### Met_data temp dir
+
+-   Stage2 met data copied from the SCC until we have an S3 bucket to point to
+
+-   Semi-daily met data by site in Sao Paolo from Feb 10 - Mar 13
