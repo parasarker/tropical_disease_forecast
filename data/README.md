@@ -2,9 +2,7 @@
 
 #### state_pop_by_year.csv
 
--   Brazil annual population data by state ("state", "year", "pop_est", "observed").
-
--   Values are aggregated to state level.
+-   Variables: "state", "year", "pop_est", "observed"
 
 -   Missing years are filled by linear interpolation (where observed = FALSE).
 
@@ -12,12 +10,18 @@
 
     <https://ftp.ibge.gov.br/Estimativas_de_Populacao/>
 
-#### Met_data temp dirs
+#### Met_data temp dir
 
--   Stage 3 and Stage2 met data copied from the SCC until we have an S3 bucket to point to
+-   Stage2: forecast met, semi-daily per site (2025-02-10 to 2026-03-13)
 
--   Semi-daily met data by site in Sao Paolo
+    -   Variables: "APCP", "CFRZR", "CICEP", "CRAIN", "CSNOW", "DLWRF", "DSWRF", "ICETK", "LHTFL", "PRES", "PWAT", "RH", "SHTFL", "SNOD", "SOILW", "TCDC", "TMAX", "TMIN", "TMP", "TSOIL", "UGRD", "ULWRF", "USWRF", "VGRD", "WEASD"
 
--   Source:
--     SCC "/projectnb/dietzelab/cwebb16/FRP/drivers/stage3_temp"
--     SCC "/projectnb/dietzelab/cwebb16/FRP/drivers/stage2_temp"
+-   Stage3: current/analysis met, monthly-ish per site (2026-03-19 and 2026-04-01)
+
+    -   Variables: "air_pressure", "air_temperature", "eastward_wind", "northward_wind", "precipitation_flux", "relative_humidity", "surface_downwelling_longwave_flux_in_air", "surface_downwelling_shortwave_flux_in_air"
+
+-   Source: Met data copied from the SCC until we have an S3 bucket to point to
+
+    [/projectnb/dietzelab/cwebb16/FRP/drivers/stage2_temp](https://scc-ondemand1.bu.edu/pun/sys/dashboard/files/fs//projectnb/dietzelab/cwebb16/FRP/drivers/stage2_temp)
+
+    [/projectnb/dietzelab/cwebb16/FRP/drivers/stage3_temp](https://scc-ondemand1.bu.edu/pun/sys/dashboard/files/fs//projectnb/dietzelab/cwebb16/FRP/drivers/stage2_temp){.uri}
