@@ -481,10 +481,7 @@ file.exists(forecast_file) # did it work?
 
 # submit to BU challenge S3 bucket 
 # COMMENTED OUT UNTIL WE ARE READY!
-# s3_submit <- arrow::s3_bucket("bu4cast-ci-write/challenges/project_id=bu4cast/forecasts/", endpoint_override = s3_endpoint, anonymous = FALSE  # need credentials to write
+s3_submit <- arrow::s3_bucket("bu4cast-ci-write/challenges/project_id=bu4cast/forecasts/", endpoint_override = s3_endpoint, anonymous = FALSE)  # need credentials to write
 
 # upload file
 #aws.s3::put_object(file = forecast_file, object = forecast_file, bucket = "bu4cast-ci-write",region = "", base_url = s3_endpoint)
-
-cat("n:", n, "\n")
-cat("class n:", class(n), "\n")
