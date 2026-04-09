@@ -1,6 +1,6 @@
 # Project Data Files
 
-#### state_pop_by_year.csv
+#### ibge_population_byState_2007-2025.csv
 
 -   Variables: "state", "year", "pop_est", "observed"
 
@@ -9,6 +9,14 @@
 -   Source: IBGE population estimates
 
     <https://ftp.ibge.gov.br/Estimativas_de_Populacao/>
+
+#### worldclim_monthly_sites_2007-2024
+
+-   Variables: "site", "year", "month", "tmin_c", "tmax_c", "prec_mm"
+
+-   Source: WorldClim
+
+    <https://geodata.ucdavis.edu/climate/worldclim/2_1/hist/cts4.09/>
 
 #### Met_data temp dir
 
