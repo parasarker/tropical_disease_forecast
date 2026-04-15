@@ -3,92 +3,62 @@
 # Corresponds to 3/20/2026 "Pulling and Visualizing Data" Project Milestone
 
 
-
 #### load packages and data ####
 library(rjags)
-library(daymetr)
 library(ecoforecastR)
+library(dplyr)
 
-# get disease datat
-disease_url = 'https://minio-s3.apps.shift.nerc.mghpcc.org/bu4cast-ci-read/challenges/project_id=bu4cast/targets/tropical-disease-targets.csv'
+# get monthly disease, met and population data
+source("00_clean_and_plot_monthly_inputs.R")
+d <- monthly_data(start_date = as.Date("2007-01-01"), end_date = as.Date("2024-08-01"))
+df <- d$monthly_merged
 
-disease_targets = read.csv(disease_url)
+# pick one site from d$site_ids --> we should add the option to include all HERE
+model_site_id <- d$site_ids[[1]]
+model_site_monthly <- df %>%
+  filter(site_id == model_site_id) %>%
+  arrange(month)
 
-# subset data to only Sao Paolo sites
-sp <- subset(disease_targets, site_id >= 350000 & site_id < 360000)  # SP = 35xxxx IBGE prefix
-sp$month <- as.Date(format(as.Date(sp$datetime), "%Y-%m-01"))
-sp_monthly <- aggregate(observation ~ month, data = sp, sum, na.rm = TRUE) #aggregate to monthly
+## we should add the option to run sites one at a time or together
+## maybe something like if(all_sites==TRUE){ RUN ALL SITES } else{ PICK }
+##
+##
+##
 
-# Format input data
-time = sp_monthly$month
-y = sp_monthly$observation
+y <- model_site_monthly$observation
+time <- model_site_monthly$month
+n <- nrow(model_site_monthly)
+tMax <- model_site_monthly$tmax_c
+tMin <- model_site_monthly$tmin_c
+precip <- model_site_monthly$prec_mm
+pop_scaled <- model_site_monthly$pop_scaled #scaled per 100k people
 
-plot(time, y, type='l', ylab="Cases", lwd=2)
+## remove the time points where driver data is unavailable
+# find rows that DO have driver data
+hasData <- !is.na(tMax) & !is.na(tMin) & !is.na(precip) & !is.na(pop_scaled)
 
-# get weather data for Sao Paulo (we may need to double check this site to make sure it actually overlaps with ours)
-# we still dont have our actual met data, so this is our current best bet...
-daymet0 <- download_daymet(site = "SaoPaulo", start = 2007, end = 2025, internal = TRUE)
-daymet <- daymet0$data
-
-# make date col
-daymet$date <- as.Date(paste(daymet$year, daymet$yday, sep = "-"), "%Y-%j")
-daymet$month <- as.Date(format(daymet$date, "%Y-%m-01"))
-
-#aggregate to monthly to match disease data
-tMin_monthly <- aggregate(daymet$tmin..deg.c., by = list(daymet$month), mean, na.rm = TRUE)
-tMax_monthly <- aggregate(daymet$tmax..deg.c., by = list(daymet$month), mean, na.rm = TRUE)
-precip_monthly <- aggregate(daymet$prcp..mm.day., by = list(daymet$month), sum, na.rm = TRUE)
-
-time_month <- as.Date(format(time, "%Y-%m-01"))
-
-# extract temp and precip data
-tMin <- tMin_monthly[,2][match(time_month, tMin_monthly[,1])]
-tMax <- tMax_monthly[,2][match(time_month, tMax_monthly[,1])]
-precip <- precip_monthly[,2][match(time_month, precip_monthly[,1])]
-
-## remove the time points where climate data is unavailable
-# find rows that DO have climate data
-hasData <- !is.na(tMax) & !is.na(tMin) & !is.na(precip)
-
-# subset data and covariates
+# subset data and covariates (must keep lengths aligned and update n)
 y <- y[hasData]
 tMax <- tMax[hasData]
 tMin <- tMin[hasData]
 precip <- precip[hasData]
+pop_scaled <- pop_scaled[hasData]
 time <- time[hasData]
-
-# Update length for JAGS
 n <- length(y)
 
-## add population data! 
-pop_path <- file.path("data", "state_pop_by_year.csv")
-pop_df <- read.csv(pop_path)
-pop_sp <- subset(pop_df, state == "SP")
-pop_sp <- pop_sp[order(pop_sp$year), ]
-
-# repeated monthly within year (to match disease monthly cadence)
-population <- pop_sp$pop_est[match(as.integer(format(time, "%Y")), pop_sp$year)]
-
-# divided by 1 mil so beta_pop is per mil people (similar scale to climate covariates)
-pop_scaled <- population / 1e6
-
 # Recreate data list for JAGS
-data <- list(
+jags_data <- list(
   y = as.integer(y),
   n = n,
   tMax = tMax,
   tMin = tMin,
   precip = precip,
   pop = pop_scaled,
-  
-  x_ic = log(mean(y) + 1),
+  x_ic = log(mean(y, na.rm = TRUE) + 1),
   tau_ic = 1,
   
   a_add = 1,
-  r_add = 1,
-  
-  a_r = 1, # i think we need to add these too
-  r_r = 1
+  r_add = 1
 )
 
 
@@ -156,7 +126,7 @@ for(i in 1:nchain){
 # Send info to JAGS
 j.model <- jags.model(
   file = textConnection(StateSpace),
-  data = data,
+  data = jags_data,
   inits = init,
   n.chains = nchain
 )
@@ -176,11 +146,11 @@ dic.samples(j.model, 2000)
 # Larger samples
 jags.out <- coda.samples(
   model = j.model,
-  variable.names = c("x","tau_add","r"),  #let's look at the other coefficients too at some point
+  variable.names = c("x","tau_add","r"),
   n.iter = 10000
 )
 
-# Visualization (needs fixed now)
+# Visualization
 time.rng = c(1,length(time))
 out <- as.matrix(jags.out)
 
