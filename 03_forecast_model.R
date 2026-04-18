@@ -23,255 +23,144 @@ library(ecoforecastR)
 library(tidyverse)
 library(lubridate)
 library(arrow)
-library(daymetr)
 
 model_id       <- "BU_visceral_leishmaniacs"   #name for leaderboard,, can change
 forecast_date  <- Sys.Date()
-n_ensemble     <- 100    # max ~100 for submission 
-horizon        <- 2      # months forward to forecast (adjust depending)
+n_ensemble     <- 100    # max ~100 for submission
+# Forecast horizon (months): e.g. last obs Aug 2024 -> Sep 2024 ... Aug 2025
+horizon        <- 12 # sept 2024 -> aug 2025
 
 # data bucket URLS
 s3_endpoint  <- "minio-s3.apps.shift.nerc.mghpcc.org"
 target_url   <- "https://minio-s3.apps.shift.nerc.mghpcc.org/bu4cast-ci-read/challenges/project_id=bu4cast/targets/tropical-disease-targets.csv"
 drivers_path <- "bu4cast-ci-read/challenges/project_id=bu4cast/drivers/"
 
-# parquet met (dirs from repo data/stage3_temp, data/stage2_temp)
-stage3_dir <- file.path("data", "stage3_temp")
-stage2_dir <- file.path("data", "stage2_temp")
-
-# convert met from kelvin to C
-kelvin_to_celsius <- function(x) { as.numeric(x)-273.15 }
-
-# monthly covariates from stage3 (one row per parameter x month)
-monthly_stage3 <- function(s3, sp_sites) {
-  s3 <- dplyr::filter(s3, .data$site_id %in% sp_sites)
-  air <- s3 |>
-    dplyr::filter(.data$variable == "air_temperature") |>
-    # aggregate to monthly
-    dplyr::mutate(month = as.Date(lubridate::floor_date(.data$datetime, "month"))) |>
-    dplyr::group_by(.data$site_id, .data$parameter, .data$month) |>
-    dplyr::summarise(
-      # we want tMax and tMin because that's what stage2 has
-      tMax = max(.data$prediction, na.rm = TRUE),
-      tMin = min(.data$prediction, na.rm = TRUE),
-      .groups = "drop"
-    ) |>
-    dplyr::mutate(
-      tMax = kelvin_to_celsius(.data$tMax), 
-      tMin = kelvin_to_celsius(.data$tMin)
-    )
-  prec <- s3 |>
-    dplyr::filter(.data$variable == "precipitation_flux") |>
-    dplyr::mutate(month = as.Date(lubridate::floor_date(.data$datetime, "month"))) |>
-    dplyr::group_by(.data$site_id, .data$parameter, .data$month) |>
-    dplyr::summarise(
-      # stage3 has precipitation flux, stage2 has accumulated precipitation (apcp)
-      # these are both amount/month so we can probably treat as same
-      precip = sum(.data$prediction, na.rm = TRUE), .groups = "drop")
-  dplyr::full_join(air, prec, by = c("site_id", "parameter", "month")) |>
-    dplyr::group_by(.data$parameter, .data$month) |>
-    dplyr::summarise(
-      tMax = mean(.data$tMax, na.rm = TRUE),
-      tMin = mean(.data$tMin, na.rm = TRUE),
-      precip = mean(.data$precip, na.rm = TRUE),
-      .groups = "drop"
-    )
+# Monthly forecast met from stage2: TMP (monthly mean C) + APCP (mm/month total).
+monthly_met_future <- function(raw, model_site_id) {
+  raw <- dplyr::filter(raw, as.character(site_id) %in% as.character(model_site_id))
+  tmp <- raw |>
+    dplyr::filter(variable == "TMP") |>
+    dplyr::mutate(month = as.Date(lubridate::floor_date(datetime, "month"))) |>
+    dplyr::group_by(site_id, parameter, month) |>
+    dplyr::summarise(TMP = mean(prediction), .groups = "drop") |>
+    dplyr::group_by(parameter, month) |>
+    dplyr::summarise(TMP = mean(TMP), .groups = "drop")
+  apcp <- raw |>
+    dplyr::filter(variable == "APCP") |>
+    dplyr::mutate(month = as.Date(lubridate::floor_date(datetime, "month"))) |>
+    dplyr::group_by(site_id, parameter, month) |>
+    dplyr::summarise(APCP = sum(prediction), .groups = "drop") |>
+    dplyr::group_by(parameter, month) |>
+    dplyr::summarise(APCP = mean(APCP), .groups = "drop")
+  out <- dplyr::full_join(tmp, apcp, by = c("parameter", "month"))
+  dplyr::mutate(out, month = as.Date(as.character(month)))
 }
 
-# monthly tMax, tMin, precipitation from stage2  (one row per parameter x month).
-monthly_stage2 <- function(s2, sp_sites) {
-  s2 <- dplyr::filter(s2, .data$site_id %in% sp_sites)
-  tmp <- s2 |>
-    dplyr::filter(.data$variable %in% c("TMAX", "TMIN")) |>
-    dplyr::mutate(month = as.Date(lubridate::floor_date(.data$datetime, "month"))) |>
-    dplyr::group_by(.data$site_id, .data$parameter, .data$month, .data$variable) |>
-    dplyr::summarise(prediction = mean(.data$prediction, na.rm = TRUE), .groups = "drop") |>
-    dplyr::group_by(.data$parameter, .data$month, .data$variable) |>
-    dplyr::summarise(prediction = mean(.data$prediction, na.rm = TRUE), .groups = "drop") |>
-    tidyr::pivot_wider(names_from = .data$variable, values_from = .data$prediction)
-  prec <- s2 |>
-    dplyr::filter(.data$variable == "APCP") |>
-    dplyr::mutate(month = as.Date(lubridate::floor_date(.data$datetime, "month"))) |>
-    dplyr::group_by(.data$site_id, .data$parameter, .data$month) |>
-    dplyr::summarise(APCP = sum(.data$prediction, na.rm = TRUE), .groups = "drop") |>
-    dplyr::group_by(.data$parameter, .data$month) |>
-    dplyr::summarise(APCP = mean(.data$APCP, na.rm = TRUE), .groups = "drop")
-  out <- dplyr::full_join(tmp, prec, by = c("parameter", "month"))
-  for (cn in c("TMAX", "TMIN", "APCP")) {
-    if (!cn %in% names(out)) out[[cn]] <- NA_real_
-  }
-  # stage2 tmax/min are already in C
-  out
-}
-
+# ------------------------------------------------------------------------------
+#  THIS BLOCK SHOULD BE MADE INTO A SHARED FUNCTION BETWEEN 
+# ------------------------------------------------------------------------------
 #### step 1: load current target data ####
+# get monthly disease, met and population data
+source("00_clean_and_plot_monthly_inputs.R")
+d <- monthly_data(start_date = as.Date("2007-01-01"), end_date = as.Date("2024-08-01"))
+df <- d$monthly_merged
 
-# pull latest disease observations
-disease_targets <- read.csv(target_url)
+# pick one site from d$site_ids --> we should add the option to include all HERE
+model_site_id <- d$site_ids[[1]]
+model_site_monthly <- df %>%
+  filter(site_id == model_site_id) %>%
+  arrange(month)
 
-# subset to Sao Paulo (site_id 350000–360000)
-sp <- subset(disease_targets, site_id >= 350000 & site_id < 360000)
-sp$month <- as.Date(format(as.Date(sp$datetime), "%Y-%m-01"))
-sp_monthly <- aggregate(observation ~ month, data = sp, sum, na.rm = TRUE)
+## we should add the option to run sites one at a time or together
+## maybe something like if(all_sites==TRUE){ RUN ALL SITES } else{ PICK }
+##
+##
+##
 
-time <- sp_monthly$month
-y    <- sp_monthly$observation
+y <- model_site_monthly$observation
+time <- model_site_monthly$month
+# Single temperature covariate comparable to monthly mean TMP on the forecast side
+temp   <- (model_site_monthly$tmin_c + model_site_monthly$tmax_c) / 2
+precip <- model_site_monthly$prec_mm
+pop_scaled <- model_site_monthly$pop_scaled #scaled per 100k people
+n_obs      <- length(y)
 
-# get site_ids to filter met data later on
-sp_sites <- unique(sp$site_id)
+# First month after last observation through +horizon months (e.g. Sep 2024–Aug 2025 if data end Aug 2024)
+forecast_start <- max(time) %m+% months(1)
+future_months  <- seq(forecast_start, by = "month", length.out = horizon)
+stopifnot(length(future_months) == horizon)
 
+# ------------------------------------------------------------------------------
 
-#### step 2: load historical met drivers  ####
+#### step 3: load future met drivers (stage2 from S3) ####
+stage2 <- arrow::s3_bucket(paste0(drivers_path, "stage2/"), endpoint_override = s3_endpoint, anonymous = TRUE)
+met_future <- arrow::open_dataset(stage2) |> dplyr::collect()
+met_future <- met_future[as.character(met_future$site_id) == as.character(model_site_id), , drop = FALSE]
 
-daymet0 <- download_daymet(site = "SaoPaulo", start = 2024, end = 2025, internal = TRUE)
-daymet <- daymet0$data
+refs <- sort(unique(as.Date(as.character(met_future$reference_datetime))))
+fd   <- forecast_start
+reference_date <- if (length(refs) == 0L) {
+  as.Date(NA)
+} else if (any(refs <= fd)) {
+  max(refs[refs <= fd])
+} else {
+  min(refs)
+}
+met_future <- met_future[as.Date(as.character(met_future$reference_datetime)) == reference_date, , drop = FALSE]
 
-# make date col
-daymet$date <- as.Date(paste(daymet$year, daymet$yday, sep = "-"), "%Y-%j")
-daymet$month <- as.Date(format(daymet$date, "%Y-%m-01"))
+#### step 4: forecast-year population
+pop_site <- d$pop_site |>
+  dplyr::filter(site_id == model_site_id) |>
+  dplyr::distinct(year, pop_est) |>
+  dplyr::arrange(year)
 
-#aggregate to monthly to match disease data
-tMin_monthly <- aggregate(daymet$tmin..deg.c., by = list(daymet$month), mean, na.rm = TRUE)
-tMax_monthly <- aggregate(daymet$tmax..deg.c., by = list(daymet$month), mean, na.rm = TRUE)
-precip_monthly <- aggregate(daymet$prcp..mm.day., by = list(daymet$month), sum, na.rm = TRUE)
+last_year   <- max(pop_site$year)
+last_pop    <- pop_site$pop_est[pop_site$year == last_year][1]
+growth_rate <- mean(diff(pop_site$pop_est) / head(pop_site$pop_est, -1))
 
-time_month <- as.Date(format(time, "%Y-%m-01"))
-
-# extract temp and precip data
-tMin <- tMin_monthly[,2][match(time_month, tMin_monthly[,1])]
-tMax <- tMax_monthly[,2][match(time_month, tMax_monthly[,1])]
-precip <- precip_monthly[,2][match(time_month, precip_monthly[,1])]
-
-# was going to use stage3 data (monthly, 30 ensembles) but it only has data from the past two months right now, so I have used the same daymet data that we used in the previous script as a placeholder right now...
-# heres the code I wouldve used to bring that data in tho 
-# s3 <- arrow::s3_bucket(paste0(drivers_path, "stage3/"), endpoint_override = s3_endpoint, anonymous = TRUE)
-# met_hist <- arrow::open_dataset(s3) |> filter(site_id %in% sp_sites) |> collect()
-
-# time_month <- as.Date(format(time, "%Y-%m-01"))
-# 
-# ds3 <- arrow::open_dataset(stage3_dir) |>
-#   dplyr::filter(site_id %in% sp_sites) |>
-#   dplyr::collect()
-# 
-# met_s3 <- monthly_stage3(ds3, sp_sites)
-# met_fit <- dplyr::filter(met_s3, .data$parameter == 0)
-# tMax   <- met_fit$tMax[match(time_month, met_fit$month)]
-# tMin   <- met_fit$tMin[match(time_month, met_fit$month)]
-# precip <- met_fit$precip[match(time_month, met_fit$month)]
-# 
-# # remove time points where climate data is unavailable
-# hasData <- !is.na(tMax) & !is.na(tMin) & !is.na(precip)
-# y      <- y[hasData]
-# tMax   <- tMax[hasData]
-# tMin   <- tMin[hasData]
-# precip <- precip[hasData]
-# time   <- time[hasData]
-# n      <- length(y)
-
-# met_hist <- arrow::open_dataset(s3) |> filter(site_id %in% sp_sites) |> collect()
-
-# Align met drivers to disease time vector, handle NAs
-
-
-#### step 3: load future met drivers (stage2) ####
-
-# stage2 <- arrow::s3_bucket(paste0(drivers_path, "stage2/"),endpoint_override = s3_endpoint,anonymous = TRUE)
-# met_future <- arrow::open_dataset(s3_stage2) |> filter(site_id %in% sp_sites) |> collect()
-
-#### step 4: load population drivers ####
-pop_df <- read.csv("data/state_pop_by_year.csv")
-pop_sp <- subset(pop_df, state == "SP")
-pop_sp <- pop_sp[order(pop_sp$year), ]
-
-# extend population forward for forecast horizon using recent growth rate
-last_year   <- tail(pop_sp$year, 1)
-last_pop    <- tail(pop_sp$pop_est, 1)
-growth_rate <- mean(diff(pop_sp$pop_est) / head(pop_sp$pop_est, -1))
-
-# add projected rows for 2026 onward
 forecast_years <- (last_year + 1):(last_year + ceiling(horizon / 12) + 1)
 pop_projected <- data.frame(
-  state    = "SP",
-  year     = forecast_years,
-  pop_est  = last_pop * (1 + growth_rate)^(forecast_years - last_year),
-  observed = FALSE
+  year    = forecast_years,
+  pop_est = last_pop * (1 + growth_rate)^(forecast_years - last_year)
 )
-
-pop_sp <- rbind(pop_sp, pop_projected)
-
-# match to disease time vector and scale
-population <- pop_sp$pop_est[match(as.integer(format(time, "%Y")), pop_sp$year)]
-pop_scaled <- population / 1e6
-
-#### step 4b: load stage2 forecast met (for step 7) ####
-ds2 <- arrow::open_dataset(stage2_dir)
-refs <- ds2 |>
-  dplyr::distinct(.data$reference_datetime) |>
-  dplyr::collect() |>
-  dplyr::mutate(rd = as.Date(.data$reference_datetime))
-fd <- as.Date(forecast_date)
-ref_str <- format(if (fd %in% refs$rd) fd else max(refs$rd[refs$rd <= fd]))
-reference_date <- as.Date(ref_str)
-s2 <- ds2 |>
-  dplyr::filter(.data$reference_datetime == ref_str) |>
-  dplyr::collect()
-met_stage2_monthly <- monthly_stage2(s2, sp_sites)
-
-# Filter data
-hasData <- !is.na(tMax) & !is.na(tMin) & !is.na(precip)
-y       <- y[hasData]
-tMax    <- tMax[hasData]
-tMin    <- tMin[hasData]
-precip  <- precip[hasData]
-time    <- time[hasData]
-pop_scaled <- pop_scaled[hasData]
-n       <- length(y)
+pop_site <- rbind(pop_site, pop_projected)
 
 #### step 5: fit model to current data ####
 
 # data list for JAGS
 jags_data <- list(
-  y      = as.integer(y),
-  n      = n,
-  tMax   = tMax,
-  tMin   = tMin,
-  precip = precip,
-  pop    = pop_scaled,
-  
-  x_ic   = log(mean(y) + 1),
-  tau_ic = 1,
-  a_add  = 1,
-  r_add  = 1,
-  a_r    = 1,
-  r_r    = 1
+  y       = as.integer(y),
+  n_obs   = n_obs,
+  temp    = as.numeric(temp),
+  precip  = as.numeric(precip),
+  pop     = as.numeric(pop_scaled),
+  x_ic    = log(mean(y) + 1),
+  tau_ic  = 1,
+  a_add   = 1,
+  r_add   = 1
 )
 
 # JAGS model string
 StateSpace = "
 model{
-  # Data Model (Negative Binomial)
-  for(t in 1:n){
+  for(t in 1:n_obs){
     y[t] ~ dnegbin(p[t], r)
     p[t] <- r / (r + mu[t])
     log(mu[t]) <- x[t]
   }
-  # Process Model (AR(1) with climate covariates)
-  for(t in 2:n){
+  for(t in 2:n_obs){
     x[t] ~ dnorm(mu_proc[t], tau_add)
-    mu_proc[t] <- alpha + phi * x[t-1] + 
-                  beta_tMax * tMax[t] + 
-                  beta_tMin * tMin[t] + 
+    mu_proc[t] <- alpha + phi * x[t-1] +
+                  beta_temp * temp[t] +
                   beta_precip * precip[t] +
                   beta_pop * pop[t]
   }
-  # Priors
   x[1] ~ dnorm(x_ic, tau_ic)
   tau_add ~ dgamma(a_add, r_add)
-  r ~ dgamma(1, 0.01) # tightened from dgamma(0.001, 0.001) to improve convergence 
+  r ~ dgamma(1, 0.01)
   alpha ~ dnorm(0, 0.01)
   phi ~ dnorm(0, 0.01)
-  beta_tMax ~ dnorm(0, 0.01)
-  beta_tMin ~ dnorm(0, 0.01)
+  beta_temp ~ dnorm(0, 0.01)
   beta_precip ~ dnorm(0, 0.01)
   beta_pop ~ dnorm(0, 0.01)}"
 
@@ -281,7 +170,7 @@ init <- list()
 for(i in 1:nchain){
   y.samp = sample(y, length(y), replace=TRUE)
   init[[i]] <- list(
-    tau_add = 1 / var(diff(log(y.samp + 1))),  
+    tau_add = 1 / max(stats::var(diff(log(y.samp + 1))), 1e-12),
     r = 10
   )
 }
@@ -306,11 +195,11 @@ plot(jags.out)
 # full sample 
 jags.out <- coda.samples(
   model = j.model,
-  variable.names = c("x",
-                     "alpha", "phi",
-                     "beta_tMax", "beta_tMin",
-                     "beta_precip", "beta_pop",
-                     "tau_add", "r"),
+  variable.names = c(
+    "x", "alpha", "phi",
+    "beta_temp", "beta_precip", "beta_pop",
+    "tau_add", "r"
+  ),
   n.iter = 10000)
 
 # extract posterior matrix
@@ -320,7 +209,7 @@ out <- as.matrix(jags.out)
 #### step 6: get initial conditions from last fitted state ####
 
 # grab all columns that correspond to latent state x
-x.cols <- grep("^x", colnames(out))
+x.cols <- grep("^x\\[", colnames(out))
 
 # notes!
 # x[T] = last latent state = initial conditons for the forecast
@@ -328,58 +217,49 @@ x.cols <- grep("^x", colnames(out))
 x_T_all <- out[, max(x.cols)]
 
 # subsample to n_ensemble members to propagate IC uncertainty into the forecast
-idx    <- sample(nrow(out), n_ensemble, replace = FALSE)
+idx    <- sample(nrow(out), n_ensemble, replace = nrow(out) < n_ensemble)
 x_T    <- x_T_all[idx]       # IC vector, length n_ensemble
 params <- out[idx, ]          # matching parameter samples for each ensemble member
 
 #### step 7: run ensemble forecast forward ####
+# future_months and horizon set in step 1
 
-# future months to forecast
-future_months <- seq(
-  from = max(time) %m+% months(1),
-  by = "month",
-  length.out = horizon)
+# get future met drivers (ensemble members x horizon)
+met_monthly_forecast <- monthly_met_future(met_future, model_site_id)
+n_met_members <- dplyr::n_distinct(met_monthly_forecast$parameter)
+met_param <- (seq_len(n_ensemble) - 1) %% n_met_members
+mo <- as.Date(format(future_months, "%Y-%m-01"))
+mo_df <- tibble::tibble(month = mo)
 
+temp_future   <- matrix(NA_real_, nrow = horizon, ncol = n_ensemble)
+precip_future <- matrix(NA_real_, nrow = horizon, ncol = n_ensemble)
 
-# get future met drivers
-# stage2 (31 members) × horizon
-met_param <- (seq_len(n_ensemble) - 1L) %% 31L
-mo <- as.Date(format(future_months,"%Y-%m-01"))
+for (e in seq_len(n_ensemble)) {
+  sub <- dplyr::filter(met_monthly_forecast, parameter == met_param[e]) |>
+    dplyr::mutate(month = as.Date(as.character(month)))
+  z <- dplyr::left_join(mo_df, sub, by = "month")
+  temp_future[, e]   <- z$TMP
+  precip_future[, e] <- z$APCP
+}
 
-tMax_future   <- matrix(mean(tail(tMax, 12)),   nrow = horizon, ncol = n_ensemble)
-tMin_future   <- matrix(mean(tail(tMin, 12)),   nrow = horizon, ncol = n_ensemble)
-precip_future <- matrix(mean(tail(precip, 12)), nrow = horizon, ncol = n_ensemble)
-
-# for (e in seq_len(n_ensemble)) {
-#   sub <- dplyr::filter(met_stage2_monthly, .data$parameter == met_param[e])
-#   m <- match(mo, sub$month)
-#   tMax_future[, e]   <- sub$TMAX[m]
-#   tMin_future[, e]   <- sub$TMIN[m]
-#   precip_future[, e] <- sub$APCP[m]
-# }
 # get future population
-pop_future <- pop_sp$pop_est[match(as.integer(format(future_months, "%Y")), pop_sp$year)] / 1e6
+pop_future <- pop_site$pop_est[match(as.integer(format(future_months, "%Y")), pop_site$year)] / 1e6
 
 # initialize forecast storage
 x_fc <- matrix(NA, nrow = horizon, ncol = n_ensemble)  # latent state
 y_fc <- matrix(NA, nrow = horizon, ncol = n_ensemble)  # predicted cases
 
 # run forecast for each ensemble member
-for(e in 1:n_ensemble){
-  
-  x_prev <- x_T[e]        # ← initialize x_prev to the IC for this member
-  x_fc[1, e] <- x_prev    # store it in the matrix too
-  
-  for(t in 2:horizon){
+for (e in seq_len(n_ensemble)) {
+  x_prev <- x_T[e]
+  for (t in seq_len(horizon)) {
     mu_proc <- params[e, "alpha"] +
-      params[e, "phi"] * x_prev +          # ← now correctly uses previous state
-      params[e, "beta_tMax"]   * tMax_future[t, e] +
-      params[e, "beta_tMin"]   * tMin_future[t, e] +
+      params[e, "phi"] * x_prev +
+      params[e, "beta_temp"] * temp_future[t, e] +
       params[e, "beta_precip"] * precip_future[t, e] +
-      params[e, "beta_pop"]    * pop_future[t]
-    
-    x_fc[t, e] <- rnorm(1, mu_proc, sd = 1/sqrt(params[e, "tau_add"]))
-    x_prev <- x_fc[t, e]   # ← carry state forward
+      params[e, "beta_pop"] * pop_future[t]
+    x_fc[t, e] <- stats::rnorm(1, mu_proc, sd = 1 / sqrt(params[e, "tau_add"]))
+    x_prev <- x_fc[t, e]
   }
   
   # observation model -- convert latent state to predicted cases
@@ -421,8 +301,7 @@ x_fitted_cols <- matrix(out[idx, grep("^x\\[", colnames(out))], nrow = n_ensembl
 mu_fitted <- exp(x_fitted_cols)
 
 # compute quantiles
-fitted_ci  <- apply(mu_fitted, 2, quantile, probs = c(0.025, 0.5, 0.975), na.rm = TRUE)
-forecast_ci <- apply(y_fc, 1, quantile, probs = c(0.025, 0.5, 0.975), na.rm = TRUE)
+fitted_ci  <- apply(mu_fitted, 2, stats::quantile, probs = c(0.025, 0.5, 0.975), na.rm = TRUE)
 
 # build plot data frames
 fitted_df <- tibble(
@@ -433,11 +312,12 @@ fitted_df <- tibble(
   obs    = y
 )
 
+# per lead time (works for horizon == 1; apply(..., 1, quantile) alone can return a vector)
 forecast_df <- tibble(
   month  = future_months,
-  lo     = forecast_ci["2.5%",],
-  median = forecast_ci["50%",],
-  hi     = forecast_ci["97.5%",]
+  lo     = apply(y_fc, 1, function(v) stats::quantile(v, 0.025, na.rm = TRUE)),
+  median = apply(y_fc, 1, function(v) stats::quantile(v, 0.5, na.rm = TRUE)),
+  hi     = apply(y_fc, 1, function(v) stats::quantile(v, 0.975, na.rm = TRUE))
 )
 
 # plot
@@ -446,6 +326,8 @@ last_year_start <- max(time) %m-% months(12)
 
 fitted_zoom <- filter(fitted_df, month >= last_year_start)
 
+x_rng <- range(c(fitted_zoom$month, forecast_df$month), na.rm = TRUE)
+
 ggplot() +
   geom_ribbon(data = fitted_zoom, aes(x = month, ymin = lo, ymax = hi), fill = "steelblue", alpha = 0.3) +
   geom_line(data = fitted_zoom, aes(x = month, y = median), color = "steelblue", linewidth = 0.8) +
@@ -453,7 +335,8 @@ ggplot() +
   geom_ribbon(data = forecast_df, aes(x = month, ymin = lo, ymax = hi), fill = "tomato", alpha = 0.3) +
   geom_line(data = forecast_df, aes(x = month, y = median), color = "tomato", linewidth = 1) +
   geom_vline(xintercept = as.numeric(max(time)), linetype = "dashed", color = "grey40") +
-  labs(title = "VL Forecast — São Paulo (last 12 months + forecast)", x = "Month", y = "Cases") +
+  scale_x_date(limits = x_rng, date_breaks = "1 month", date_labels = "%b %Y") +
+  labs(title = "VL Forecast", x = "Month", y = "Cases") +
   theme_bw()
 
 #### step 9: write forecast file and submit ####
@@ -463,7 +346,7 @@ forecast_long <- tibble(
   model_id           = model_id,
   reference_datetime = reference_date,
   datetime           = rep(future_months, times = n_ensemble),
-  site_id            = "SP",
+  site_id            = model_site_id,
   family             = "ensemble",
   parameter          = rep(1:n_ensemble, each = horizon),
   variable           = "cases",
@@ -481,7 +364,7 @@ file.exists(forecast_file) # did it work?
 
 # submit to BU challenge S3 bucket 
 # COMMENTED OUT UNTIL WE ARE READY!
-s3_submit <- arrow::s3_bucket("bu4cast-ci-write/challenges/project_id=bu4cast/forecasts/", endpoint_override = s3_endpoint, anonymous = FALSE)  # need credentials to write
+# s3_submit <- arrow::s3_bucket("bu4cast-ci-write/challenges/project_id=bu4cast/forecasts/", endpoint_override = s3_endpoint, anonymous = FALSE)
 
 # upload file
 #aws.s3::put_object(file = forecast_file, object = forecast_file, bucket = "bu4cast-ci-write",region = "", base_url = s3_endpoint)
