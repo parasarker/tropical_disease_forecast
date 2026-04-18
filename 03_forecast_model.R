@@ -234,12 +234,30 @@ mo_df <- tibble::tibble(month = mo)
 temp_future   <- matrix(NA_real_, nrow = horizon, ncol = n_ensemble)
 precip_future <- matrix(NA_real_, nrow = horizon, ncol = n_ensemble)
 
-for (e in seq_len(n_ensemble)) {
-  sub <- dplyr::filter(met_monthly_forecast, parameter == met_param[e]) |>
-    dplyr::mutate(month = as.Date(as.character(month)))
-  z <- dplyr::left_join(mo_df, sub, by = "month")
-  temp_future[, e]   <- z$TMP
-  precip_future[, e] <- z$APCP
+# Guard for zero met members
+if (n_met_members == 0L) {
+  warning("No stage2 met data found — using climatological fallback for all members.")
+  temp_future[]   <- mean(temp,   na.rm = TRUE)
+  precip_future[] <- mean(precip, na.rm = TRUE)
+} else {
+# Fill loop 
+  for (e in seq_len(n_ensemble)) {
+    sub <- dplyr::filter(met_monthly_forecast, parameter == met_param[e]) |>
+      dplyr::mutate(month = as.Date(as.character(month)))
+    z <- dplyr::left_join(mo_df, sub, by = "month")
+    temp_future[, e]   <- z$TMP
+    precip_future[, e] <- z$APCP
+  }
+# N/A fallback
+  clim_temp   <- mean(temp,   na.rm = TRUE)
+  clim_precip <- mean(precip, na.rm = TRUE)
+  
+  for (e in seq_len(n_ensemble)) {
+    na_t <- is.na(temp_future[, e])
+    na_p <- is.na(precip_future[, e])
+    temp_future[na_t, e]   <- clim_temp
+    precip_future[na_p, e] <- clim_precip
+  }
 }
 
 # get future population
