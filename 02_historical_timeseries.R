@@ -1,4 +1,4 @@
-# "02_historical_timeseries.R
+# 02_historical_timeseries.R
 # Script for fitting historical data using Bayesian state-space model
 # Corresponds to 3/20/2026 "Pulling and Visualizing Data" Project Milestone
 
@@ -28,19 +28,17 @@ model_site_monthly <- df %>%
 y <- model_site_monthly$observation
 time <- model_site_monthly$month
 n <- nrow(model_site_monthly)
-tMax <- model_site_monthly$tmax_c
-tMin <- model_site_monthly$tmin_c
+temp <- (model_site_monthly$tmin_c + model_site_monthly$tmax_c) / 2  # combined temp
 precip <- model_site_monthly$prec_mm
 pop_scaled <- model_site_monthly$pop_scaled #scaled per 100k people
 
 ## remove the time points where driver data is unavailable
 # find rows that DO have driver data
-hasData <- !is.na(tMax) & !is.na(tMin) & !is.na(precip) & !is.na(pop_scaled)
+hasData <- !is.na(temp) & !is.na(precip) & !is.na(pop_scaled)
 
 # subset data and covariates (must keep lengths aligned and update n)
 y <- y[hasData]
-tMax <- tMax[hasData]
-tMin <- tMin[hasData]
+temp <- temp[hasData]
 precip <- precip[hasData]
 pop_scaled <- pop_scaled[hasData]
 time <- time[hasData]
@@ -50,8 +48,7 @@ n <- length(y)
 jags_data <- list(
   y = as.integer(y),
   n = n,
-  tMax = tMax,
-  tMin = tMin,
+  temp = temp,
   precip = precip,
   pop = pop_scaled,
   x_ic = log(mean(y, na.rm = TRUE) + 1),
@@ -79,8 +76,7 @@ for(t in 2:n){
   x[t] ~ dnorm(mu_proc[t], tau_add)
   
   mu_proc[t] <- alpha + phi * x[t-1] + 
-  beta_tMax * tMax[t] + 
-  beta_tMin * tMin[t] + 
+  beta_temp * temp[t] + 
   beta_precip * precip[t] +
   beta_pop * pop[t]
   }
@@ -97,10 +93,9 @@ for(t in 2:n){
   alpha ~ dnorm(0, 0.01) # AR(1) intercept
   phi ~ dnorm(0, 0.01) # AR(1) coefficient = persistence 
 
-  beta_tMax ~ dnorm(0, 0.01)  #temp max covariate
-  beta_tMin ~ dnorm(0, 0.01)  #temp min covariate
-  beta_precip ~ dnorm(0, 0.01) #precip. covariate
-  beta_pop ~ dnorm(0, 0.01) #population covariate (NOT a prior for total population)
+  beta_temp ~ dnorm(0, 0.01)    # combined temp covariate
+  beta_precip ~ dnorm(0, 0.01)  # precip. covariate
+  beta_pop ~ dnorm(0, 0.01)     # population covariate (NOT a prior for total population)
 }
 "
 # Notes
@@ -146,7 +141,8 @@ dic.samples(j.model, 2000)
 # Larger samples
 jags.out <- coda.samples(
   model = j.model,
-  variable.names = c("x","tau_add","r"),
+  variable.names = c("x", "tau_add", "r", "alpha", "phi",
+                     "beta_temp", "beta_precip", "beta_pop"),
   n.iter = 10000
 )
 
@@ -183,5 +179,5 @@ ecoforecastR::ciEnvelope(
 points(time, y, pch="+", cex=0.5)
 
 
-# save MCMC output locally 
+# save MCMC output locally
 # saveRDS(jags.out, file = "mcmc_output.rds")
